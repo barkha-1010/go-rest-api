@@ -1,14 +1,16 @@
 package main
 
 import (
-	// "fmt"
-	"net/http"
-	"os"
-	// "bufio"
+	"bufio"
+	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"github.com/gorilla/mux"
 	"io/ioutil"
 	"log"
+	"net/http"
+	"os"
 	"time"
 )
 
@@ -158,6 +160,99 @@ func dApiCall(url string, chUrl, chText, chErr chan string) {
 	}
 }
 
+func authenticateTwitter() bool {
+	fmt.Println("New Bearer Token for Twitter!")
+	client := &http.Client{}
+	authUrl := "https://api.twitter.com/oauth2/token"
+	bodyStr := []byte("grant_type=client_credentials")
+	req, _ := http.NewRequest("POST", authUrl, bytes.NewBuffer(bodyStr))
+
+	consumer_token := base64.URLEncoding.EncodeToString([]byte(configuration.Twitter[0] + ":" + configuration.Twitter[1]))
+	auth_str := "Basic " + consumer_token
+
+	req.Header.Add("Authorization", auth_str)
+	req.Header.Add("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+
+	resp, _ := client.Do(req)
+	if resp.StatusCode == 200 {
+		body, _ := ioutil.ReadAll(resp.Body)
+		type Token struct {
+			Access_token string
+		}
+		var tok Token
+		json.Unmarshal(body, &tok)
+
+		configuration.Twitter[2] = tok.Access_token
+		configs, _ := json.Marshal(configuration)
+		os.Remove("conf.json")
+		var f, _ = os.Create("conf.json")
+		defer f.Close()
+		w := bufio.NewWriter(f)
+		fmt.Fprintf(w, "%v", string(configs))
+		w.Flush()
+		return true
+	}
+	return false
+}
+
+func tApiCall(url string, chUrl, chText, chErr chan string) {
+	client := &http.Client{}
+	req, err := http.NewRequest("GET", url, nil)
+	req.Header.Add("Authorization", "Bearer "+configuration.Twitter[2])
+	resp, err := client.Do(req)
+	if resp.StatusCode != 200 {
+		flag := authenticateTwitter()
+		if !flag {
+			defer close(chErr)
+			chErr <- apiCallError + sites[2]
+			return
+		}
+	}
+	body, err := ioutil.ReadAll(resp.Body)
+	type Message struct {
+		Statuses interface{}
+		Id       float64
+	}
+	var m Message
+	err = json.Unmarshal(body, &m)
+	defer func() {
+		close(chUrl)
+		close(chText)
+		close(chErr)
+	}()
+	var link, snippet string
+	if err == nil {
+		switch x := m.Statuses.(type) {
+		case []interface{}:
+			for _, e := range x {
+				switch l2 := e.(type) {
+				case map[string]interface{}:
+					for k, val := range l2 {
+						if k == "source" {
+							switch l3 := val.(type) {
+							case string:
+								link = string(l3)
+							}
+						}
+						if k == "text" {
+							switch l4 := val.(type) {
+							case string:
+								snippet = string(l4)
+							}
+						}
+					}
+					for i := 0; i < 2; i++ {
+						select {
+						case chUrl <- link:
+						case chText <- snippet:
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func makeApiCall(site, url, query string, chUrl, chText, chErr chan string) {
 	var apiUrl string
 	switch site {
@@ -167,6 +262,9 @@ func makeApiCall(site, url, query string, chUrl, chText, chErr chan string) {
 	case sites[1]:
 		apiUrl = url + "q=" + query
 		dApiCall(apiUrl, chUrl, chText, chErr)
+	case sites[2]:
+		apiUrl = url + "q=" + query
+		tApiCall(apiUrl, chUrl, chText, chErr)
 	}
 }
 
@@ -176,10 +274,10 @@ func GetSearchResults(w http.ResponseWriter, req *http.Request) {
 	var finalResult Reply
 	if searchWord != "" {
 
-		// seedUrls[sites[1]] = "https://api.twitter.com/1.1/search/tweets.json?"
 		sitesInfo := []seedInfo{
 			{"https://www.googleapis.com/customsearch/v1?", make(chan string), make(chan string), make(chan string)},
 			{"http://api.duckduckgo.com/?format=json&", make(chan string), make(chan string), make(chan string)},
+			{"https://api.twitter.com/1.1/search/tweets.json?", make(chan string), make(chan string), make(chan string)},
 		}
 
 		for i, siteInfo := range sitesInfo {
@@ -214,6 +312,7 @@ func main() {
 	var file, _ = os.Open("conf.json")
 	var decoder = json.NewDecoder(file)
 	decoder.Decode(&configuration)
+	file.Close()
 
 	// REST API
 	router := mux.NewRouter()

@@ -1,4 +1,4 @@
 {
     "Google": ["api key","cx engine"],
-    "Twitter": ["access_token","access_token_secret"]
+    "Twitter": ["api key","api secret","token"]
 }
