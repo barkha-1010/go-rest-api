@@ -3,13 +3,13 @@ package main
 import (
 	"fmt"
 	"net/http"
-	"os"
-	// "strings"
-	"bufio"
+	// "os"
+	// "bufio"
 	"encoding/json"
 	"github.com/gorilla/mux"
 	"io/ioutil"
 	"log"
+	"time"
 )
 
 type Result struct {
@@ -64,9 +64,11 @@ func gAPiCall(url string, chUrl, chText chan string) {
 							}
 						}
 					}
-					select {
-					case chUrl <- link:
-					case chText <- snippet:
+					for i := 0; i < 2; i++ {
+						select {
+						case chUrl <- link:
+						case chText <- snippet:
+						}
 					}
 				}
 			}
@@ -115,9 +117,11 @@ func dApiCall(url string, chUrl, chText chan string) {
 							}
 						}
 					}
-					select {
-					case chUrl <- link:
-					case chText <- snippet:
+					for i := 0; i < 2; i++ {
+						select {
+						case chUrl <- link:
+						case chText <- snippet:
+						}
 					}
 				}
 			}
@@ -151,7 +155,7 @@ type seedInfo struct {
 }
 
 type Tuple struct {
-	Url, Text string
+	Url, Text, Error string
 }
 
 type SiteResult struct {
@@ -168,9 +172,9 @@ var sites = [3]string{"google", "duckduckgo", "twitter"}
 
 // add authentication credentials here
 var gCreds LoginCreds = LoginCreds{key: "", engine: ""}
+var tCreds LoginCreds = LoginCreds{access_token: "", access_token_secret: ""}
 
 func GetSearchResults(w http.ResponseWriter, req *http.Request) {
-	fmt.Println("searching...")
 	params := mux.Vars(req)
 	searchWord := params["searchWord"]
 	var finalResult Reply
@@ -189,9 +193,17 @@ func GetSearchResults(w http.ResponseWriter, req *http.Request) {
 		var siteResArr []SiteResult
 		for i, siteInfo := range sitesInfo {
 			var tupArr []Tuple
-			for val := range siteInfo.chUrl {
-				tupArr = append(tupArr, Tuple{val, <-siteInfo.chText})
+
+			select {
+			case val := <-siteInfo.chUrl:
+				tupArr = append(tupArr, Tuple{Url: val, Text: <-siteInfo.chText})
+				for val := range siteInfo.chUrl {
+					tupArr = append(tupArr, Tuple{Url: val, Text: <-siteInfo.chText})
+				}
+			case <-time.After(1 * time.Second):
+				tupArr = append(tupArr, Tuple{Error: "Result was late!"})
 			}
+
 			siteResArr = append(siteResArr, SiteResult{sites[i], tupArr})
 		}
 		finalResult = Reply{searchWord, siteResArr}
