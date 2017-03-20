@@ -1,9 +1,9 @@
 package main
 
 import (
-	"fmt"
+	// "fmt"
 	"net/http"
-	// "os"
+	"os"
 	// "bufio"
 	"encoding/json"
 	"github.com/gorilla/mux"
@@ -11,6 +11,37 @@ import (
 	"log"
 	"time"
 )
+
+const apiCallError = "Error in making API call to "
+const lateResError = "Life is too short, make that API call faster!"
+
+var sites = [3]string{"google", "duckduckgo", "twitter"}
+
+type Configuration struct {
+	Google  []string
+	Twitter []string
+}
+
+var configuration Configuration
+
+type seedInfo struct {
+	url                  string
+	chUrl, chText, chErr chan string
+}
+
+type Tuple struct {
+	Url, Text, Error string
+}
+
+type SiteResult struct {
+	Name    string
+	Results []Tuple
+}
+
+type Reply struct {
+	Query      string
+	AllResults []SiteResult
+}
 
 type Result struct {
 	query   string
@@ -22,27 +53,26 @@ type SiteData struct {
 	text string
 }
 
-func gAPiCall(url string, chUrl, chText chan string) {
+func gAPiCall(url string, chUrl, chText, chErr chan string) {
 	var link, snippet string
-	resp, err := http.Get(url)
-	if err != nil {
-		fmt.Println("Error in making API call to " + sites[0])
-		// return
+	resp, _ := http.Get(url)
+	if resp.StatusCode != 200 {
+		defer close(chErr)
+		chErr <- apiCallError + sites[0]
+		return
 	}
-	// resp.Status
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Println("Error in reading result from API call to " + sites[0])
-		// return
-	}
+
+	body, _ := ioutil.ReadAll(resp.Body)
+
 	type Message struct {
 		Items interface{}
 	}
 	var m Message
-	err = json.Unmarshal(body, &m)
+	err := json.Unmarshal(body, &m)
 	defer func() {
 		close(chUrl)
 		close(chText)
+		close(chErr)
 	}()
 	if err == nil {
 		switch x := m.Items.(type) {
@@ -76,26 +106,25 @@ func gAPiCall(url string, chUrl, chText chan string) {
 	}
 }
 
-func dApiCall(url string, chUrl, chText chan string) {
+func dApiCall(url string, chUrl, chText, chErr chan string) {
 	var link, snippet string
-	resp, err := http.Get(url)
-	if err != nil {
-		fmt.Println("Error in making API call to " + sites[1])
-		// return
+	resp, _ := http.Get(url)
+	if resp.StatusCode != 200 {
+		defer close(chErr)
+		chErr <- apiCallError + sites[1]
+		return
 	}
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		fmt.Println("Error in reading result from API call to " + sites[1])
-		// return
-	}
+	body, _ := ioutil.ReadAll(resp.Body)
+
 	type Message struct {
 		RelatedTopics interface{}
 	}
 	var m Message
-	err = json.Unmarshal(body, &m)
+	err := json.Unmarshal(body, &m)
 	defer func() {
 		close(chUrl)
 		close(chText)
+		close(chErr)
 	}()
 	if err == nil {
 		switch x := m.RelatedTopics.(type) {
@@ -129,50 +158,17 @@ func dApiCall(url string, chUrl, chText chan string) {
 	}
 }
 
-func makeApiCall(site, url, query string, chUrl, chText chan string) {
+func makeApiCall(site, url, query string, chUrl, chText, chErr chan string) {
 	var apiUrl string
 	switch site {
 	case sites[0]:
-		apiUrl = url + "key=" + gCreds.key + "&cx=" + gCreds.engine + "&q=" + query
-		gAPiCall(apiUrl, chUrl, chText)
+		apiUrl = url + "key=" + configuration.Google[0] + "&cx=" + configuration.Google[1] + "&q=" + query
+		gAPiCall(apiUrl, chUrl, chText, chErr)
 	case sites[1]:
 		apiUrl = url + "q=" + query
-		dApiCall(apiUrl, chUrl, chText)
+		dApiCall(apiUrl, chUrl, chText, chErr)
 	}
 }
-
-type LoginCreds struct {
-	access_token        string
-	access_token_secret string
-	key                 string
-	engine              string
-}
-
-type seedInfo struct {
-	url    string
-	chUrl  chan string
-	chText chan string
-}
-
-type Tuple struct {
-	Url, Text, Error string
-}
-
-type SiteResult struct {
-	Name    string
-	Results []Tuple
-}
-
-type Reply struct {
-	Query      string
-	AllResults []SiteResult
-}
-
-var sites = [3]string{"google", "duckduckgo", "twitter"}
-
-// add authentication credentials here
-var gCreds LoginCreds = LoginCreds{key: "", engine: ""}
-var tCreds LoginCreds = LoginCreds{access_token: "", access_token_secret: ""}
 
 func GetSearchResults(w http.ResponseWriter, req *http.Request) {
 	params := mux.Vars(req)
@@ -182,12 +178,12 @@ func GetSearchResults(w http.ResponseWriter, req *http.Request) {
 
 		// seedUrls[sites[1]] = "https://api.twitter.com/1.1/search/tweets.json?"
 		sitesInfo := []seedInfo{
-			{"https://www.googleapis.com/customsearch/v1?", make(chan string), make(chan string)},
-			{"http://api.duckduckgo.com/?format=json&", make(chan string), make(chan string)},
+			{"https://www.googleapis.com/customsearch/v1?", make(chan string), make(chan string), make(chan string)},
+			{"http://api.duckduckgo.com/?format=json&", make(chan string), make(chan string), make(chan string)},
 		}
 
 		for i, siteInfo := range sitesInfo {
-			go makeApiCall(sites[i], siteInfo.url, searchWord, siteInfo.chUrl, siteInfo.chText)
+			go makeApiCall(sites[i], siteInfo.url, searchWord, siteInfo.chUrl, siteInfo.chText, siteInfo.chErr)
 		}
 
 		var siteResArr []SiteResult
@@ -195,13 +191,15 @@ func GetSearchResults(w http.ResponseWriter, req *http.Request) {
 			var tupArr []Tuple
 
 			select {
+			case err := <-siteInfo.chErr:
+				tupArr = append(tupArr, Tuple{Error: err})
 			case val := <-siteInfo.chUrl:
 				tupArr = append(tupArr, Tuple{Url: val, Text: <-siteInfo.chText})
 				for val := range siteInfo.chUrl {
 					tupArr = append(tupArr, Tuple{Url: val, Text: <-siteInfo.chText})
 				}
 			case <-time.After(1 * time.Second):
-				tupArr = append(tupArr, Tuple{Error: "Result was late!"})
+				tupArr = append(tupArr, Tuple{Error: lateResError})
 			}
 
 			siteResArr = append(siteResArr, SiteResult{sites[i], tupArr})
@@ -212,6 +210,12 @@ func GetSearchResults(w http.ResponseWriter, req *http.Request) {
 }
 
 func main() {
+	// Loading Authentication Config
+	var file, _ = os.Open("conf.json")
+	var decoder = json.NewDecoder(file)
+	decoder.Decode(&configuration)
+
+	// REST API
 	router := mux.NewRouter()
 	router.HandleFunc("/{searchWord}", GetSearchResults).Methods("GET")
 	log.Fatal(http.ListenAndServe(":8080", router))
